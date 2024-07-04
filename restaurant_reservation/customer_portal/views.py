@@ -5,6 +5,10 @@ from .serializers import CustomerSerializer
 from admin_portal.models import Restaurant, Reservation
 from admin_portal.serializers import RestaurantSerializer, ReservationSerializer
 from django.contrib.auth.hashers import make_password, check_password
+from datetime import datetime, timedelta
+from django.utils.timezone import make_aware
+
+
 
 @api_view(['POST'])
 def customer_register(request):
@@ -30,18 +34,30 @@ def check_availability(request):
     location = request.GET.get('location')
     date = request.GET.get('date')
     time = request.GET.get('time')
-    try:
-        restaurants = Restaurant.objects.filter(location=location)
-        available_restaurants = []
-        for restaurant in restaurants:
-            reservations = Reservation.objects.filter(restaurant=restaurant, reservation_time__date=date, reservation_time__time=time)
-            total_reserved = sum([r.num_people for r in reservations])
-            if restaurant.capacity > total_reserved:
-                available_restaurants.append(restaurant)
-        serializer = RestaurantSerializer(available_restaurants, many=True)
-        return JsonResponse(serializer.data, safe=False)
-    except Restaurant.DoesNotExist:
-        return JsonResponse({'message': 'No restaurants found'}, status=404)
+
+    if not (location and date and time):
+        return JsonResponse({'error': 'Location, date, and time parameters are required.'}, status=400)
+
+    date_time_str = f"{date} {time}"
+    date_time = datetime.strptime(date_time_str, '%Y-%m-%d %H:%M:%S')
+
+    available_restaurants = []
+    restaurants = Restaurant.objects.filter(location=location)
+
+    for restaurant in restaurants:
+        reservations = Reservation.objects.filter(restaurant=restaurant, reservation_time=date_time)
+        reserved_seats = sum(reservation.num_people for reservation in reservations)
+        available_seats = restaurant.capacity - reserved_seats
+
+        available_restaurants.append({
+            'id': restaurant.pk,
+            'name': restaurant.name,
+            'capacity': restaurant.capacity,
+            'available_seats': available_seats,
+            'location': restaurant.location
+        })
+
+    return JsonResponse(available_restaurants, safe=False)    
 
 @api_view(['POST'])
 def book_reservation(request):
@@ -59,6 +75,47 @@ def book_reservation(request):
             reservation.save()
             restaurant.capacity -= data['num_people']
             restaurant.save()
+            return JsonResponse({'message': 'Reservation successful'})
+        else:
+            return JsonResponse({'message': 'Not enough seats available'}, status=400)
+    except Restaurant.DoesNotExist:
+        return JsonResponse({'message': 'Restaurant not found'}, status=404)
+
+@api_view(['POST'])
+def book_reservation(request):
+    data = request.data
+    try:
+        restaurant = Restaurant.objects.get(restaurant_id=data['restaurant_id'])
+        reservation_time = datetime.strptime(data['reservation_time'], '%Y-%m-%dT%H:%M:%SZ')
+        reservation_time = make_aware(reservation_time)
+
+        # Check for overlapping reservations
+        overlapping_reservations = Reservation.objects.filter(
+            restaurant=restaurant,
+            reservation_time=reservation_time
+        )
+
+        if overlapping_reservations.exists():
+            return JsonResponse({'message': 'The slot is already booked'}, status=400)
+
+        # Calculate available seats
+        reservations = Reservation.objects.filter(
+            restaurant=restaurant,
+            reservation_time__date=reservation_time.date(),
+            reservation_time__time=reservation_time.time()
+        )
+        total_reserved = sum([r.num_people for r in reservations])
+        available_seats = restaurant.capacity - total_reserved
+
+        if available_seats >= data['num_people']:
+            reservation = Reservation(
+                restaurant=restaurant,
+                customer_mobile=data['customer_mobile'],
+                num_people=data['num_people'],
+                reservation_time=reservation_time,
+                status=True
+            )
+            reservation.save()
             return JsonResponse({'message': 'Reservation successful'})
         else:
             return JsonResponse({'message': 'Not enough seats available'}, status=400)
