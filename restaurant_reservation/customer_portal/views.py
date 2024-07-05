@@ -87,38 +87,55 @@ def book_reservation(request):
     try:
         restaurant = Restaurant.objects.get(restaurant_id=data['restaurant_id'])
         reservation_time = datetime.strptime(data['reservation_time'], '%Y-%m-%dT%H:%M:%SZ')
-        reservation_time = make_aware(reservation_time)
-
-        # Check for overlapping reservations
-        overlapping_reservations = Reservation.objects.filter(
-            restaurant=restaurant,
-            reservation_time=reservation_time
-        )
-
-        if overlapping_reservations.exists():
-            return JsonResponse({'message': 'The slot is already booked'}, status=400)
 
         # Calculate available seats
         reservations = Reservation.objects.filter(
             restaurant=restaurant,
-            reservation_time__date=reservation_time.date(),
-            reservation_time__time=reservation_time.time()
+            reservation_time__gte=reservation_time - timedelta(minutes=45),
+            reservation_time__lt=reservation_time + timedelta(minutes=45),
+            status=True
         )
-        total_reserved = sum([r.num_people for r in reservations])
-        available_seats = restaurant.capacity - total_reserved
 
-        if available_seats >= data['num_people']:
+        # Check for table availability
+        tables_of_6 = [i for i in range(1, restaurant.tables_of_6 + 1)]
+        tables_of_4 = [i for i in range(1, restaurant.tables_of_4 + 1)]
+        tables_of_2 = [i for i in range(1, restaurant.tables_of_2 + 1)]
+
+        for reservation in reservations:
+            if reservation.table_type == 6:
+                if reservation.table_number in tables_of_6:
+                    tables_of_6.remove(reservation.table_number)
+            elif reservation.table_type == 4:
+                if reservation.table_number in tables_of_4:
+                    tables_of_4.remove(reservation.table_number)
+            elif reservation.table_type == 2:
+                if reservation.table_number in tables_of_2:
+                    tables_of_2.remove(reservation.table_number)
+
+        # Allocate table
+        allocated_table = None
+        if data['num_people'] <= 2 and tables_of_2:
+            allocated_table = (2, tables_of_2[0])
+        elif data['num_people'] <= 4 and tables_of_4:
+            allocated_table = (4, tables_of_4[0])
+        elif data['num_people'] <= 6 and tables_of_6:
+            allocated_table = (6, tables_of_6[0])
+
+        if allocated_table:
+            table_type, table_number = allocated_table
             reservation = Reservation(
                 restaurant=restaurant,
                 customer_mobile=data['customer_mobile'],
                 num_people=data['num_people'],
                 reservation_time=reservation_time,
+                table_type=table_type,
+                table_number=table_number,
                 status=True
             )
             reservation.save()
-            return JsonResponse({'message': 'Reservation successful'})
+            return JsonResponse({'message': 'Reservation successful', 'table_type': table_type, 'table_number': table_number})
         else:
-            return JsonResponse({'message': 'Not enough seats available'}, status=400)
+            return JsonResponse({'message': 'No available seats at this time'}, status=400)
     except Restaurant.DoesNotExist:
         return JsonResponse({'message': 'Restaurant not found'}, status=404)
 
